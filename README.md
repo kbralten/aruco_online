@@ -5,6 +5,7 @@ A fast, lightweight web application for detecting and decoding ArUco markers dir
 ## Features
 
 - **Multi-Dictionary Detection**: Automatically tests against all predefined ArUco dictionaries (4x4, 5x5, 6x6, 7x7, AprilTag, and Original).
+- **SVG Support**: Directly load SVG marker files exported from generators like [arucogen](https://github.com/okalachev/arucogen).
 - **Robust Image Processing**: Automatically attempts to decode markers in four different image variations:
   - Standard RGB
   - Inverted RGB (useful for dark-themed or inverted markers)
@@ -16,7 +17,7 @@ A fast, lightweight web application for detecting and decoding ArUco markers dir
 ## How to Use
 
 1. **Open the Scanner**: Open `index.html` in any modern web browser.
-2. **Upload an Image**: Drag and drop an image file (PNG, JPEG, WebP) onto the upload zone, or click the zone to select a file from your device.
+2. **Upload an Image**: Drag and drop an image file (PNG, JPEG, WebP, **SVG**) onto the upload zone, or click the zone to select a file from your device.
 3. **Wait for Analysis**: The application uses your device's CPU to run the OpenCV.js detection engine. It may take a moment to scan through all 22+ dictionaries and 4 image variations.
 4. **View Results**: 
    - Detected markers will be highlighted on the image canvas with colorful bounding boxes and ID labels.

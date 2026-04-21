@@ -377,7 +377,7 @@
                 </svg>
                 <div class="drop-zone-title">Drag & Drop Image Here</div>
                 <div class="drop-zone-desc">or click to browse from your device</div>
-                <input type="file" id="fileInput" accept="image/png, image/jpeg, image/jpg, image/webp">
+                <input type="file" id="fileInput" accept="image/png, image/jpeg, image/jpg, image/webp, image/svg+xml, .svg">
             </div>
 
             <!-- Analysis Workspace (Hidden initially) -->
@@ -417,8 +417,6 @@
         If you like this project, please <a href="https://github.com/kbralten/aruco_online" target="_blank" rel="noopener noreferrer" style="color: var(--accent-primary); text-decoration: none; font-weight: 600;">★ it on GitHub!</a>
     </footer>
 
-    <img id="imageSource" style="display: none;">
-
     <script>
         // DOM Elements
         const dropZone = document.getElementById('dropZone');
@@ -426,26 +424,109 @@
         const workspace = document.getElementById('workspace');
         const loader = document.getElementById('loader');
         const loaderText = document.getElementById('loaderText');
-        const imageSource = document.getElementById('imageSource');
         const markerGrid = document.getElementById('markerGrid');
         const noResults = document.getElementById('noResults');
         const resetBtn = document.getElementById('resetBtn');
 
         let cvReady = false;
+        let currentCanvas = null; // off-screen canvas passed to cv.imread
+
+        // Tuning constants for image pre-processing
+        const MIN_MARKER_DIM  = 300;  // scale up images whose smallest dimension is below this (px)
+        const MIN_PADDING     = 40;   // minimum white quiet-zone border to add (px)
+        const PADDING_RATIO   = 0.15; // quiet-zone border as a fraction of the scaled image's smallest dimension
+        const DEFAULT_SVG_DIM = 400;  // fallback render size for SVGs with no explicit dimensions (px)
 
         // Called when opencv.js script loads
         function onOpenCvReady() {
             console.log('OpenCV.js initialized.');
             cvReady = true;
-            // Add a small delay for smoother transition
             setTimeout(() => {
                 loader.classList.add('hidden');
             }, 800);
         }
 
+        /**
+         * Load any image file (PNG, JPEG, WebP, or SVG) into an off-screen canvas.
+         * Small images are scaled up and white padding is added around the image
+         * to ensure an adequate quiet zone for ArUco detection.
+         */
+        function loadFileToCanvas(file) {
+            return new Promise((resolve, reject) => {
+                const buildCanvas = (img, w, h) => {
+                    if (!w || !h) {
+                        reject(new Error('Could not determine image dimensions.'));
+                        return;
+                    }
+                    // Scale up very small images so the detector has enough pixels
+                    const minDim = Math.min(w, h);
+                    const scale = minDim < MIN_MARKER_DIM ? Math.ceil(MIN_MARKER_DIM / minDim) : 1;
+                    const scaledW = w * scale;
+                    const scaledH = h * scale;
+                    // Add a white quiet-zone border around the marker
+                    const pad = Math.max(MIN_PADDING, Math.round(Math.min(scaledW, scaledH) * PADDING_RATIO));
+                    const canvas = document.createElement('canvas');
+                    canvas.width  = scaledW + pad * 2;
+                    canvas.height = scaledH + pad * 2;
+                    const ctx = canvas.getContext('2d');
+                    ctx.fillStyle = 'white';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.imageSmoothingEnabled = false; // keep marker edges crisp
+                    ctx.drawImage(img, pad, pad, scaledW, scaledH);
+                    resolve(canvas);
+                };
+
+                if (file.type === 'image/svg+xml' || file.name.toLowerCase().endsWith('.svg')) {
+                    // SVG path: read as text, measure intrinsic size, render to canvas.
+                    // cv.imread uses canvas.width/height, which would be 0 for an <img>
+                    // element loaded with an SVG src that has no explicit HTML dimensions.
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        let svgW = 0, svgH = 0;
+                        try {
+                            const parser = new DOMParser();
+                            const svgEl = parser.parseFromString(e.target.result, 'image/svg+xml').documentElement;
+                            svgW = parseFloat(svgEl.getAttribute('width'))  || 0;
+                            svgH = parseFloat(svgEl.getAttribute('height')) || 0;
+                            if (!svgW || !svgH) {
+                                const vb = (svgEl.getAttribute('viewBox') || '').trim().split(/[\s,]+/);
+                                svgW = parseFloat(vb[2]) || DEFAULT_SVG_DIM;
+                                svgH = parseFloat(vb[3]) || DEFAULT_SVG_DIM;
+                            }
+                        } catch (parseErr) {
+                            console.warn('SVG dimension parsing failed, falling back to defaults:', parseErr);
+                            svgW = svgH = DEFAULT_SVG_DIM;
+                        }
+
+                        const url = URL.createObjectURL(new Blob([e.target.result], { type: 'image/svg+xml' }));
+                        const img = new Image();
+                        img.onload = () => {
+                            buildCanvas(img, img.naturalWidth || svgW, img.naturalHeight || svgH);
+                            URL.revokeObjectURL(url);
+                        };
+                        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Failed to render SVG.')); };
+                        img.src = url;
+                    };
+                    reader.onerror = () => reject(new Error('Failed to read SVG file.'));
+                    reader.readAsText(file);
+                } else {
+                    // Raster image path (PNG, JPEG, WebP, …)
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        const img = new Image();
+                        img.onload  = () => buildCanvas(img, img.naturalWidth, img.naturalHeight);
+                        img.onerror = () => reject(new Error('Failed to decode image.'));
+                        img.src = e.target.result;
+                    };
+                    reader.onerror = () => reject(new Error('Failed to read image file.'));
+                    reader.readAsDataURL(file);
+                }
+            });
+        }
+
         // --- Drag & Drop Handling ---
         const preventDefaults = (e) => { e.preventDefault(); e.stopPropagation(); };
-        
+
         ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
             dropZone.addEventListener(eventName, preventDefaults, false);
         });
@@ -458,21 +539,16 @@
             dropZone.addEventListener(eventName, () => dropZone.classList.remove('dragover'), false);
         });
 
-        dropZone.addEventListener('drop', (e) => {
-            const dt = e.dataTransfer;
-            const files = dt.files;
-            handleFiles(files);
-        });
-
+        dropZone.addEventListener('drop', (e) => handleFiles(e.dataTransfer.files));
         dropZone.addEventListener('click', () => fileInput.click());
         fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
 
         resetBtn.addEventListener('click', () => {
             workspace.classList.remove('active');
+            currentCanvas = null;
             setTimeout(() => {
                 dropZone.style.display = 'flex';
                 fileInput.value = '';
-                // Optional UI reset
                 dropZone.style.animation = 'fadeInUp 0.5s ease forwards';
             }, 300);
         });
@@ -485,43 +561,39 @@
             if (files.length === 0) return;
 
             const file = files[0];
-            if (!file.type.startsWith('image/')) {
-                alert("Invalid file format. Please upload an image.");
+            const isSvg = file.type === 'image/svg+xml' || file.name.toLowerCase().endsWith('.svg');
+            if (!file.type.startsWith('image/') && !isSvg) {
+                alert("Invalid file format. Please upload a PNG, JPEG, WebP, or SVG image.");
                 return;
             }
 
-            // Show processing loader
             loaderText.innerText = "Processing Image...";
             loader.classList.remove('hidden');
-
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                imageSource.onload = () => {
-                    // Yield to browser rendering before heavy computation
-                    setTimeout(() => {
-                        analyzeImage();
-                        // Hide loader after analysis is done
-                        loader.classList.add('hidden');
-                        setTimeout(() => {
-                            loaderText.innerText = "Loading OpenCV Engine...";
-                        }, 400); // Wait for fade out transition
-                    }, 50);
-                };
-                imageSource.src = e.target.result;
-            };
-            reader.readAsDataURL(file);
-
-            // UI Transisiton
             dropZone.style.display = 'none';
             workspace.classList.add('active');
+
+            loadFileToCanvas(file)
+                .then(canvas => {
+                    currentCanvas = canvas;
+                    // Yield to the browser before running heavy CV work
+                    setTimeout(() => {
+                        analyzeImage();
+                        loader.classList.add('hidden');
+                        setTimeout(() => { loaderText.innerText = "Loading OpenCV Engine..."; }, 400);
+                    }, 50);
+                })
+                .catch(err => {
+                    console.error('Failed to load image:', err);
+                    alert('Failed to load image: ' + (err.message || err));
+                    loader.classList.add('hidden');
+                });
         }
 
         function analyzeImage() {
             try {
-                // Read image from DOM using OpenCV
-                let src = cv.imread(imageSource);
-                
-                // Convert to RGB as Aruco often expects BGR/RGB
+                // Read from the pre-processed off-screen canvas (padded & scaled)
+                let src = cv.imread(currentCanvas);
+
                 let rgb = new cv.Mat();
                 cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
 
@@ -534,54 +606,49 @@
                 let grayInverted = new cv.Mat();
                 cv.bitwise_not(gray, grayInverted);
 
-                let variations = [
-                    { name: 'RGB', mat: rgb },
-                    { name: 'RGB (Inverted)', mat: rgbInverted },
-                    { name: 'Grayscale', mat: gray },
+                const variations = [
+                    { name: 'RGB',                mat: rgb },
+                    { name: 'RGB (Inverted)',      mat: rgbInverted },
+                    { name: 'Grayscale',           mat: gray },
                     { name: 'Grayscale (Inverted)', mat: grayInverted }
                 ];
 
-                let dictKeys = Object.keys(cv).filter(k => k.startsWith('DICT_'));
-                console.log("Testing dictionaries: ", dictKeys);
-                
-                // UI Reset
+                const dictKeys = Object.keys(cv).filter(k => k.startsWith('DICT_'));
+                console.log("Testing dictionaries:", dictKeys);
+
                 markerGrid.innerHTML = '';
                 let totalMarkersFound = 0;
-                let foundMarkerIds = new Set(); // To prevent duplicates in UI
+                // Key is "DICT_NAME:id" so the same ID in different dictionaries each get a card
+                const foundMarkerKeys = new Set();
 
-                for (let dictName of dictKeys) {
-                    let dictValue = cv[dictName];
-                    let dict = cv.getPredefinedDictionary(dictValue);
-                    let parameters = new cv.aruco_DetectorParameters();
-                    let refineParams = new cv.aruco_RefineParameters(10, 3, true);
-                    let detector = new cv.aruco_ArucoDetector(dict, parameters, refineParams);
+                for (const dictName of dictKeys) {
+                    const dict       = cv.getPredefinedDictionary(cv[dictName]);
+                    const parameters = new cv.aruco_DetectorParameters();
+                    const refineParams = new cv.aruco_RefineParameters(10, 3, true);
+                    const detector   = new cv.aruco_ArucoDetector(dict, parameters, refineParams);
 
-                    for (let variation of variations) {
-                        let markerCorners = new cv.MatVector();
-                        let markerIds = new cv.Mat();
-                        let rejectedCandidates = new cv.MatVector();
-                        
-                        // We must pass an RGB/Grayscale image to detectMarkers
+                    for (const variation of variations) {
+                        const markerCorners      = new cv.MatVector();
+                        const markerIds          = new cv.Mat();
+                        const rejectedCandidates = new cv.MatVector();
+
                         detector.detectMarkers(variation.mat, markerCorners, markerIds, rejectedCandidates);
 
                         if (markerIds.rows > 0) {
-                            console.log(`[${dictName}] [${variation.name}] Found ${markerIds.rows} markers.`);
-                            
+                            console.log(`[${dictName}] [${variation.name}] Found ${markerIds.rows} marker(s).`);
+
                             try {
-                                // Accumulate drawings on the primary RGB canvas output
                                 cv.drawDetectedMarkers(rgb, markerCorners, markerIds);
-                            } catch(e) {
-                                let msg = typeof e === 'number' ? cv.exceptionFromPtr(e).msg : e;
-                                console.warn(`[${dictName}] [${variation.name}] Failed to draw markers:`, msg);
+                            } catch (drawErr) {
+                                const msg = typeof drawErr === 'number' ? cv.exceptionFromPtr(drawErr).msg : drawErr;
+                                console.warn(`Draw failed [${dictName}] [${variation.name}]:`, msg);
                             }
 
-                            // Display results safely
                             for (let i = 0; i < markerIds.rows; ++i) {
-                                let id = markerIds.data32S[i];
-                                
-                                // Prevent showing the same ID multiple times if found across different image variations
-                                if (!foundMarkerIds.has(id)) {
-                                    foundMarkerIds.add(id);
+                                const id  = markerIds.data32S[i];
+                                const key = `${dictName}:${id}`;
+                                if (!foundMarkerKeys.has(key)) {
+                                    foundMarkerKeys.add(key);
                                     const markerEl = document.createElement('div');
                                     markerEl.className = 'marker-card';
                                     markerEl.style.animationDelay = `${totalMarkersFound * 0.1}s`;
@@ -605,6 +672,8 @@
                         rejectedCandidates.delete();
                     }
 
+                    // Always free dictionary and detector objects
+                    dict.delete();
                     parameters.delete();
                     refineParams.delete();
                     detector.delete();
@@ -618,10 +687,8 @@
                     markerGrid.style.display = 'none';
                 }
 
-                // Show resulting image in canvas
                 cv.imshow('canvasOutput', rgb);
 
-                // Cleanup memory
                 src.delete();
                 rgb.delete();
                 gray.delete();
@@ -629,11 +696,8 @@
                 grayInverted.delete();
 
             } catch (err) {
-                let errorMsg = err;
-                if (typeof err === 'number') {
-                    errorMsg = cv.exceptionFromPtr(err).msg;
-                }
-                console.error("OpenCV Analysis Error: ", errorMsg);
+                const errorMsg = typeof err === 'number' ? cv.exceptionFromPtr(err).msg : err;
+                console.error("OpenCV Analysis Error:", errorMsg);
                 alert("Failed to analyze image. Error: " + errorMsg);
             }
         }
